@@ -40,11 +40,13 @@ except ImportError:
 
 # json module is in the standard library as of python 2.6; fall back to
 # simplejson if present for older versions.
+json_support_cls = False
 try:
     import json
     assert hasattr(json, "loads") and hasattr(json, "dumps")
     _json_decode = json.loads
     _json_encode = json.dumps
+    json_support_cls = True
 except Exception:
     try:
         import simplejson
@@ -79,7 +81,7 @@ def xhtml_unescape(value):
     return re.sub(r"&(#?)(\w+?);", _convert_entity, _unicode(value))
 
 
-def json_encode(value):
+def json_encode(value, cls=None):
     """JSON-encodes the given Python object."""
     # JSON permits but does not require forward slashes to be escaped.
     # This is useful when json data is emitted in a <script> tag
@@ -87,7 +89,12 @@ def json_encode(value):
     # the javscript.  Some json libraries do this escaping by default,
     # although python's standard library does not, so we do it here.
     # http://stackoverflow.com/questions/1580647/json-why-are-forward-slashes-escaped
-    return _json_encode(recursive_unicode(value)).replace("</", "<\\/")
+    kwargs = {
+        
+    }
+    if json_support_cls and cls:
+        kwargs['cls'] = cls
+    return _json_encode(recursive_unicode(value), **kwargs).replace("</", "<\\/")
 
 
 def json_decode(value):

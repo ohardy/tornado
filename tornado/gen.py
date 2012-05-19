@@ -70,6 +70,7 @@ import sys
 import types
 
 from tornado.stack_context import ExceptionStackContext
+from tornado.util import raise_exc_info
 
 
 class KeyReuseError(Exception):
@@ -116,7 +117,12 @@ def engine(func):
         with ExceptionStackContext(handle_exception):
             gen = func(*args, **kwargs)
             if isinstance(gen, types.GeneratorType):
-                runner = Runner(gen)
+                if len(args) > 0 and hasattr(args[0], '_handle_request_exception'):
+                    instance = args[0]
+                else:
+                    instance = None
+                    
+                runner = Runner(gen, kwargs.get('callback'), instance)
                 runner.run()
                 return
             assert gen is None, gen
@@ -285,7 +291,7 @@ class Runner(object):
 
     Maintains information about pending callbacks and their results.
     """
-    def __init__(self, gen):
+    def __init__(self, gen, callback, instance):
         self.gen = gen
         self.yield_point = _NullYieldPoint()
         self.pending_callbacks = set()
@@ -294,6 +300,8 @@ class Runner(object):
         self.finished = False
         self.exc_info = None
         self.had_exception = False
+        self.callback = callback
+        self.instance = instance
 
     def register_callback(self, key):
         """Adds ``key`` to the list of callbacks."""
@@ -315,7 +323,10 @@ class Runner(object):
     def pop_result(self, key):
         """Returns the result for ``key`` and unregisters it."""
         self.pending_callbacks.remove(key)
-        return self.results.pop(key)
+        value = self.results.pop(key)
+        if isinstance(value, Arguments) and len(value.args) == 2 and isinstance(value.args[0], Exception):
+            raise_exc_info(value.args[1])
+        return value
 
     def run(self):
         """Starts or resumes the generator, running until it reaches a
@@ -352,9 +363,18 @@ class Runner(object):
                             "finished without waiting for callbacks %r" %
                             self.pending_callbacks)
                     return
-                except Exception:
+                except Exception as e:
                     self.finished = True
-                    raise
+                    if self.callback:
+                        self.callback(e, sys.exc_info())
+                        break
+                    else:
+                        if self.instance:
+                            self.instance._handle_request_exception(e)
+                            break
+                        else:
+                            raise
+                            
                 if isinstance(yielded, list):
                     yielded = Multi(yielded)
                 if isinstance(yielded, YieldPoint):

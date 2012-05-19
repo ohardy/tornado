@@ -182,9 +182,11 @@ import os.path
 import posixpath
 import re
 import threading
+import sys
 
 from tornado import escape
-from tornado.util import bytes_type, ObjectDict
+from tornado import locale
+from tornado.util import bytes_type, ObjectDict, raise_exc_info
 
 _DEFAULT_AUTOESCAPE = "xhtml_escape"
 _UNSET = object()
@@ -223,7 +225,7 @@ class Template(object):
         except Exception:
             formatted_code = _format_code(self.code).rstrip()
             logging.error("%s code:\n%s", self.name, formatted_code)
-            raise
+            raise 
 
     def generate(self, **kwargs):
         """Generate this template with the given arguments."""
@@ -235,12 +237,14 @@ class Template(object):
             "squeeze": escape.squeeze,
             "linkify": escape.linkify,
             "datetime": datetime,
+            "locale_ns": locale,
             "_utf8": escape.utf8,  # for internal use
             "_string_types": (unicode, bytes_type),
             # __name__ and __loader__ allow the traceback mechanism to find
             # the generated source code.
             "__name__": self.name.replace('.', '_'),
             "__loader__": ObjectDict(get_source=lambda name: self.code),
+            "ObjectDict" : ObjectDict
         }
         namespace.update(self.namespace)
         namespace.update(kwargs)
@@ -255,7 +259,8 @@ class Template(object):
         except Exception:
             formatted_code = _format_code(self.code).rstrip()
             logging.error("%s code:\n%s", self.name, formatted_code)
-            raise
+            exc_info = sys.exc_info()
+            raise_exc_info(exc_info)
 
     def _generate_python(self, loader, compress_whitespace):
         buffer = cStringIO.StringIO()
@@ -397,6 +402,7 @@ class _File(_Node):
     def generate(self, writer):
         writer.write_line("def _execute():", self.line)
         with writer.indent():
+            writer.write_line("locale = current_locale", self.line)
             writer.write_line("_buffer = []", self.line)
             writer.write_line("_append = _buffer.append", self.line)
             self.body.generate(writer)
@@ -436,6 +442,22 @@ class _NamedBlock(_Node):
     def find_named_blocks(self, loader, named_blocks):
         named_blocks[self.name] = self
         _Node.find_named_blocks(self, loader, named_blocks)
+
+
+class _LanguageBlock(_Node):
+    def __init__(self, name, body, template, line):
+        self.name = name
+        self.body = body
+        self.template = template
+        self.line = line
+    
+    def each_child(self):
+        return (self.body,)
+    
+    def generate(self, writer):
+        writer.write_line('locale = locale_ns.get(%s)' % (self.name, ), self.line)
+        self.body.generate(writer)
+        writer.write_line('locale = current_locale', self.line)
 
 
 class _ExtendsBlock(_Node):
@@ -491,8 +513,16 @@ class _ControlBlock(_Node):
         return (self.body,)
 
     def generate(self, writer):
+        if self.statement.startswith('for'):
+            writer.write_line("forloop = ObjectDict(counter0=-1, counter1=0)", self.line)
+        
         writer.write_line("%s:" % self.statement, self.line)
+        
         with writer.indent():
+            if self.statement.startswith('for'):
+                writer.write_line("forloop.counter0 += 1", self.line)
+                writer.write_line("forloop.counter1 += 1", self.line)
+
             self.body.generate(writer)
 
 
@@ -813,7 +843,7 @@ def _parse(reader, template, in_block=None):
             body.chunks.append(block)
             continue
 
-        elif operator in ("apply", "block", "try", "if", "for", "while"):
+        elif operator in ("apply", "block", "try", "if", "for", "while", "language"):
             # parse inner body recursively
             block_body = _parse(reader, template, operator)
             if operator == "apply":
@@ -824,6 +854,10 @@ def _parse(reader, template, in_block=None):
                 if not suffix:
                     raise ParseError("block missing name on line %d" % line)
                 block = _NamedBlock(suffix, block_body, template, line)
+            elif operator == "language":
+                if not suffix:
+                    raise ParseError("language missing language code on line %d" % line)
+                block = _LanguageBlock(suffix, block_body, template, line)
             else:
                 block = _ControlBlock(contents, line, block_body)
             body.chunks.append(block)

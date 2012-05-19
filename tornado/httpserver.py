@@ -35,6 +35,7 @@ import urlparse
 from tornado.escape import utf8, native_str, parse_qs_bytes
 from tornado import httputil
 from tornado import iostream
+from tornado import locale
 from tornado.netutil import TCPServer
 from tornado import stack_context
 from tornado.util import b, bytes_type
@@ -402,6 +403,31 @@ class HTTPRequest(object):
     def supports_http_1_1(self):
         """Returns True if this request supports HTTP/1.1 semantics"""
         return self.version == "HTTP/1.1"
+    
+    def get_browser_locale(self, default="en_US"):
+        """Determines the user's locale from Accept-Language header.
+        
+        See http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.4
+        """
+        if "Accept-Language" in self.headers:
+            languages = self.headers["Accept-Language"].split(",")
+            locales = []
+            for language in languages:
+                parts = language.strip().split(";")
+                if len(parts) > 1 and parts[1].startswith("q="):
+                    try:
+                        score = float(parts[1][2:])
+                    except (ValueError, TypeError):
+                        score = 0.0
+                else:
+                    score = 1.0
+                locales.append((parts[0], score))
+            if locales:
+                locales.sort(key=lambda (l, s): s, reverse=True)
+                codes = [l[0] for l in locales]
+                return locale.get(*codes)
+        return locale.get(default)
+    
 
     @property
     def cookies(self):

@@ -50,6 +50,7 @@ import re
 _default_locale = "en_US"
 _translations = {}
 _supported_locales = frozenset([_default_locale])
+_supported_langs = {_default_locale : _default_locale.partition('_')[0]}
 _use_gettext = False
 
 
@@ -77,9 +78,15 @@ def set_default_locale(code):
     """
     global _default_locale
     global _supported_locales
+    global _supported_langs
     _default_locale = code
     _supported_locales = frozenset(_translations.keys() + [_default_locale])
+    _supported_langs = {_default_locale : _default_locale.partition('_')[0]}
 
+def get_default_locale():
+    """docstring for get_default_locale"""
+    global _default_locale
+    return _default_locale
 
 def load_translations(directory):
     u"""Loads translations from CSV files in a directory.
@@ -110,6 +117,7 @@ def load_translations(directory):
     """
     global _translations
     global _supported_locales
+    global _supported_langs
     _translations = {}
     for path in os.listdir(directory):
         if not path.endswith(".csv"):
@@ -137,6 +145,12 @@ def load_translations(directory):
             _translations[locale].setdefault(plural, {})[english] = translation
         f.close()
     _supported_locales = frozenset(_translations.keys() + [_default_locale])
+    _supported_langs = {}
+    for key in _translations.keys():
+        new_key = key.partition('_')[0]
+        if not new_key in _supported_langs:
+            _supported_langs[new_key] = key
+    _supported_langs[_default_locale] = _default_locale.partition('_')[0]
     logging.info("Supported locales: %s", sorted(_supported_locales))
 
 
@@ -161,6 +175,7 @@ def load_gettext_translations(directory, domain):
     import gettext
     global _translations
     global _supported_locales
+    global _supported_langs
     global _use_gettext
     _translations = {}
     for lang in os.listdir(directory):
@@ -176,6 +191,12 @@ def load_gettext_translations(directory, domain):
             logging.error("Cannot load translation for '%s': %s", lang, str(e))
             continue
     _supported_locales = frozenset(_translations.keys() + [_default_locale])
+    _supported_langs = {}
+    for key in _translations.keys():
+        new_key = key.partition('_')[0]
+        if not new_key in _supported_langs:
+            _supported_langs[new_key] = key
+    _supported_langs[_default_locale] = _default_locale.partition('_')[0]
     _use_gettext = True
     logging.info("Supported locales: %s", sorted(_supported_locales))
 
@@ -205,8 +226,8 @@ class Locale(object):
                 code = parts[0].lower() + "_" + parts[1].upper()
             if code in _supported_locales:
                 return cls.get(code)
-            if parts[0].lower() in _supported_locales:
-                return cls.get(parts[0].lower())
+            if parts[0].lower() in _supported_langs:
+                return cls.get(_supported_langs[parts[0].lower()])
         return cls.get(_default_locale)
 
     @classmethod
@@ -231,6 +252,10 @@ class Locale(object):
 
     def __init__(self, code, translations):
         self.code = code
+        self.lang = code
+        for sep in ('-', '_', ):
+            if sep in self.lang:
+                self.lang = self.lang.partition(sep)[0]
         self.name = LOCALE_NAMES.get(code, {}).get("name", u"Unknown")
         self.rtl = False
         for prefix in ["fa", "ar", "he"]:
@@ -258,8 +283,19 @@ class Locale(object):
         """
         raise NotImplementedError()
 
+    def yesno(self, value, capitalize=False):
+        """docstring for yesno"""
+        _ = self.translate
+        
+        result = _('yes') if value else _('no')
+        
+        if capitalize:
+            return result.capitalize()
+        
+        return result
+    
     def format_date(self, date, gmt_offset=0, relative=True, shorter=False,
-                    full_format=False):
+                    full_format=False, really_shorter=False):
         """Formats the given date (which should be GMT).
 
         By default, we return a relative time (e.g., "2 minutes ago"). You
@@ -323,8 +359,12 @@ class Locale(object):
                          _("%(month_name)s %(day)s at %(time)s")
 
         if format is None:
-            format = _("%(month_name)s %(day)s, %(year)s") if shorter else \
-                     _("%(month_name)s %(day)s, %(year)s at %(time)s")
+            if really_shorter:
+                format = _("%(month_name)s %(year)s")
+            elif shorter:
+                format = _("%(month_name)s %(day)s, %(year)s")
+            else:
+                 format = _("%(month_name)s %(day)s, %(year)s at %(time)s")
 
         tfhour_clock = self.code not in ("en", "en_US", "zh_CN")
         if tfhour_clock:

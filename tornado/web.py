@@ -90,6 +90,8 @@ try:
 except ImportError:
     from cStringIO import StringIO as BytesIO  # python 2
 
+named_group_regex = re.compile(r'\?P<(.*)>')
+regexp_lang = re.compile(r'^(?P<lang>[\w]{2,3})(?=$|/)/')
 
 class RequestHandler(object):
     """Subclass this class and define get() or post() to make a handler.
@@ -104,9 +106,11 @@ class RequestHandler(object):
     _template_loaders = {}  # {path: template.BaseLoader}
     _template_loader_lock = threading.Lock()
 
-    def __init__(self, application, request, **kwargs):
+    def __init__(self, application, request, spec_match, url_lang=None, **kwargs):
         self.application = application
         self.request = request
+        self.url_lang = url_lang
+        self.spec_match = spec_match
         self._headers_written = False
         self._finished = False
         self._auto_finish = True
@@ -126,8 +130,26 @@ class RequestHandler(object):
         if hasattr(self.request, "connection"):
             self.request.connection.stream.set_close_callback(
                 self.on_connection_close)
+                
+        self.before_initialize()
+        
         self.initialize(**kwargs)
 
+    @property
+    def methods(self):
+        """This object like property make direct access to ui methods"""
+        if not hasattr(self, '_methods'):
+            class AttributeToMethod(object):
+                def __getattr__(instance, name):
+                    return self._ui_method(self.application.ui_methods.get(name))
+            self._methods = AttributeToMethod()
+
+        return self._methods
+        
+    def before_initialize(self):
+        """Override to add code just before initialize"""
+        pass
+        
     def initialize(self):
         """Hook for subclass initialization.
 
@@ -423,7 +445,7 @@ class RequestHandler(object):
         as a cookie use the optional value argument to get_secure_cookie.
         """
         self.require_setting("cookie_secret", "secure cookies")
-        return create_signed_value(self.application.settings["cookie_secret"],
+        return create_signed_value(self.settings["cookie_secret"],
                                    name, value)
 
     def get_secure_cookie(self, name, value=None, max_age_days=31):
@@ -435,7 +457,7 @@ class RequestHandler(object):
         self.require_setting("cookie_secret", "secure cookies")
         if value is None:
             value = self.get_cookie(name)
-        return decode_signed_value(self.application.settings["cookie_secret"],
+        return decode_signed_value(self.settings["cookie_secret"],
                                    name, value, max_age_days=max_age_days)
 
     def redirect(self, url, permanent=False, status=None):
@@ -459,7 +481,7 @@ class RequestHandler(object):
                                                      url))
         self.finish()
 
-    def write(self, chunk):
+    def write(self, chunk, cls=None):
         """Writes the given chunk to the output buffer.
 
         To write the output to the network, use the flush() method below.
@@ -479,7 +501,7 @@ class RequestHandler(object):
                                "by using async operations without the "
                                "@asynchronous decorator.")
         if isinstance(chunk, dict):
-            chunk = escape.json_encode(chunk)
+            chunk = escape.json_encode(chunk, cls)
             self.set_header("Content-Type", "application/json; charset=UTF-8")
         chunk = utf8(chunk)
         self._write_buffer.append(chunk)
@@ -595,18 +617,19 @@ class RequestHandler(object):
             handler=self,
             request=self.request,
             current_user=self.current_user,
-            locale=self.locale,
+            current_locale=self.locale,
             _=self.locale.translate,
             static_url=self.static_url,
             xsrf_form_html=self.xsrf_form_html,
-            reverse_url=self.reverse_url
+            reverse_url=self.reverse_url,
+            get_supported_locales=locale.get_supported_locales
         )
         args.update(self.ui)
         args.update(kwargs)
         return t.generate(**args)
 
     def create_template_loader(self, template_path):
-        settings = self.application.settings
+        settings = self.settings
         if "template_loader" in settings:
             return settings["template_loader"]
         kwargs = {}
@@ -648,6 +671,10 @@ class RequestHandler(object):
             return
 
         self.request.write(headers + chunk, callback=callback)
+        
+    def before_finish(self):
+        """Override to add code just before handler do finish"""
+        pass
 
     def finish(self, chunk=None):
         """Finishes this response, ending the HTTP request."""
@@ -687,6 +714,9 @@ class RequestHandler(object):
             self.flush(include_footers=True)
             self.request.finish()
             self._log()
+            
+        self.before_finish()
+        
         self._finished = True
         self.on_finish()
 
@@ -768,10 +798,8 @@ class RequestHandler(object):
         header.
         """
         if not hasattr(self, "_locale"):
-            self._locale = self.get_user_locale()
-            if not self._locale:
-                self._locale = self.get_browser_locale()
-                assert self._locale
+            self._locale = self.application.get_locale(self)
+            
         return self._locale
 
     def get_user_locale(self):
@@ -782,31 +810,21 @@ class RequestHandler(object):
         This method should return a tornado.locale.Locale object,
         most likely obtained via a call like tornado.locale.get("en")
         """
-        return None
+        return self.application.get_user_locale(self)
 
     def get_browser_locale(self, default="en_US"):
         """Determines the user's locale from Accept-Language header.
 
         See http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.4
         """
-        if "Accept-Language" in self.request.headers:
-            languages = self.request.headers["Accept-Language"].split(",")
-            locales = []
-            for language in languages:
-                parts = language.strip().split(";")
-                if len(parts) > 1 and parts[1].startswith("q="):
-                    try:
-                        score = float(parts[1][2:])
-                    except (ValueError, TypeError):
-                        score = 0.0
-                else:
-                    score = 1.0
-                locales.append((parts[0], score))
-            if locales:
-                locales.sort(key=lambda (l, s): s, reverse=True)
-                codes = [l[0] for l in locales]
-                return locale.get(*codes)
-        return locale.get(default)
+        return self.application.get_browser_locale(self, default)
+
+    def get_url_locale(self):
+        """Determines the user's locale from Accept-Language header.
+
+        See http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.4
+        """
+        return self.application.get_url_locale(self)
 
     @property
     def current_user(self):
@@ -833,7 +851,7 @@ class RequestHandler(object):
         By default, we use the 'login_url' application setting.
         """
         self.require_setting("login_url", "@tornado.web.authenticated")
-        return self.application.settings["login_url"]
+        return self.settings["login_url"]
 
     def get_template_path(self):
         """Override to customize template path for each handler.
@@ -841,7 +859,7 @@ class RequestHandler(object):
         By default, we use the 'template_path' application setting.
         Return None to load templates relative to the calling file.
         """
-        return self.application.settings.get("template_path")
+        return self.settings.get("template_path")
 
     @property
     def xsrf_token(self):
@@ -905,6 +923,16 @@ class RequestHandler(object):
         return '<input type="hidden" name="_xsrf" value="' + \
             escape.xhtml_escape(self.xsrf_token) + '"/>'
 
+    def get_static_handler_class(self):
+        """Override to customize static handler class.
+
+        By default, we use the 'static_handler_class' application setting.
+        """
+        if hasattr(self, 'static_handler_class') and self.static_handler_class:
+            return self.static_handler_class
+        
+        return self.settings.get("static_handler_class", StaticFileHandler)
+    
     def static_url(self, path, include_host=None):
         """Returns a static URL for the given relative static file path.
 
@@ -924,8 +952,7 @@ class RequestHandler(object):
         calls that do not pass ``include_host`` as a keyword argument.
         """
         self.require_setting("static_path", "static_url")
-        static_handler_class = self.settings.get(
-            "static_handler_class", StaticFileHandler)
+        static_handler_class = self.get_static_handler_class()
 
         if include_host is None:
             include_host = getattr(self, "include_host", False)
@@ -959,13 +986,13 @@ class RequestHandler(object):
 
     def require_setting(self, name, feature="this feature"):
         """Raises an exception if the given app setting is not defined."""
-        if not self.application.settings.get(name):
+        if not self.settings.get(name):
             raise Exception("You must define the '%s' setting in your "
                             "application to use %s" % (name, feature))
 
-    def reverse_url(self, name, *args):
+    def reverse_url(self, name, *args, **kwargs):
         """Alias for `Application.reverse_url`."""
-        return self.application.reverse_url(name, *args)
+        return self.application.reverse_url(name, self, *args, **kwargs)
 
     def compute_etag(self):
         """Computes the etag header to be used for this request.
@@ -988,6 +1015,23 @@ class RequestHandler(object):
         except Exception:
             self._handle_request_exception(value)
         return True
+        
+    def _decode_args_and_kwargs(self, *args, **kwargs):
+        """This method is used to decode args and kwargs from request."""
+        args = [self.decode_argument(arg) for arg in args]
+        kwargs = dict((k, self.decode_argument(v, name=k))
+                      for (k, v) in kwargs.iteritems())
+        
+        return args, kwargs
+        
+    def _prepare(self, *args, **kwargs):
+        """Override this method to customize prepare and method call"""
+        self.prepare()
+        if not self._finished:
+            args, kwargs = self._decode_args_and_kwargs(*args, **kwargs)
+            getattr(self, self.request.method.lower())(*args, **kwargs)
+            if self._auto_finish and not self._finished:
+                self.finish()
 
     def _execute(self, transforms, *args, **kwargs):
         """Executes this request with the given output transforms."""
@@ -998,16 +1042,9 @@ class RequestHandler(object):
             # If XSRF cookies are turned on, reject form submissions without
             # the proper cookie
             if self.request.method not in ("GET", "HEAD", "OPTIONS") and \
-               self.application.settings.get("xsrf_cookies"):
+               self.settings.get("xsrf_cookies"):
                 self.check_xsrf_cookie()
-            self.prepare()
-            if not self._finished:
-                args = [self.decode_argument(arg) for arg in args]
-                kwargs = dict((k, self.decode_argument(v, name=k))
-                              for (k, v) in kwargs.iteritems())
-                getattr(self, self.request.method.lower())(*args, **kwargs)
-                if self._auto_finish and not self._finished:
-                    self.finish()
+            self._prepare(*args, **kwargs)
         except Exception, e:
             self._handle_request_exception(e)
 
@@ -1213,13 +1250,13 @@ class Application(object):
             path = self.settings["static_path"]
             handlers = list(handlers or [])
             static_url_prefix = settings.get("static_url_prefix",
-                                             "/static/")
+                                             "static/")
             static_handler_class = settings.get("static_handler_class",
                                                 StaticFileHandler)
             static_handler_args = settings.get("static_handler_args", {})
             static_handler_args['path'] = path
             for pattern in [re.escape(static_url_prefix) + r"(.*)",
-                            r"/(favicon\.ico)", r"/(robots\.txt)"]:
+                            r"(favicon\.co)", r"(robots\.txt)"]:
                 handlers.insert(0, (pattern, static_handler_class,
                                     static_handler_args))
         if handlers:
@@ -1351,31 +1388,14 @@ class Application(object):
                 self, request, url="http://" + self.default_host + "/")
         else:
             for spec in handlers:
-                match = spec.regex.match(request.path)
-                if match:
-                    handler = spec.handler_class(self, request, **spec.kwargs)
-                    if spec.regex.groups:
-                        # None-safe wrapper around url_unescape to handle
-                        # unmatched optional groups correctly
-                        def unquote(s):
-                            if s is None:
-                                return s
-                            return escape.url_unescape(s, encoding=None)
-                        # Pass matched groups to the handler.  Since
-                        # match.groups() includes both named and unnamed groups,
-                        # we want to use either groups or groupdict but not both.
-                        # Note that args are passed as bytes so the handler can
-                        # decide what encoding to use.
-
-                        if spec.regex.groupindex:
-                            kwargs = dict(
-                                (str(k), unquote(v))
-                                for (k, v) in match.groupdict().iteritems())
-                        else:
-                            args = [unquote(s) for s in match.groups()]
+                spec_match = spec.match(request, self)
+                if spec_match:
+                    handler = spec_match.get_handler()
+                    args    = spec_match.args
+                    kwargs  = spec_match.kwargs
                     break
             if not handler:
-                handler = ErrorHandler(self, request, status_code=404)
+                handler = ErrorHandler(self, request, None, status_code=404)
 
         # In debug mode, re-compile templates and reload static files on every
         # request so you don't need to restart to see changes
@@ -1383,12 +1403,12 @@ class Application(object):
             with RequestHandler._template_loader_lock:
                 for loader in RequestHandler._template_loaders.values():
                     loader.reset()
-            StaticFileHandler.reset()
+            handler.get_static_handler_class().reset()
 
         handler._execute(transforms, *args, **kwargs)
         return handler
 
-    def reverse_url(self, name, *args):
+    def reverse_url(self, name, handler, *args, **kwargs):
         """Returns a URL path for handler named `name`
 
         The handler must be added to the application as a named URLSpec.
@@ -1398,7 +1418,7 @@ class Application(object):
         and url-escaped.
         """
         if name in self.named_handlers:
-            return self.named_handlers[name].reverse(*args)
+            return self.named_handlers[name].reverse(handler, *args, **kwargs)
         raise KeyError("%s not found in named urls" % name)
 
     def log_request(self, handler):
@@ -1421,6 +1441,46 @@ class Application(object):
         request_time = 1000.0 * handler.request.request_time()
         log_method("%d %s %.2fms", handler.get_status(),
                    handler._request_summary(), request_time)
+          
+
+    def get_locale(self, handler):
+        """The local for the current session.
+        
+        Determined by either get_user_locale, which you can override to
+        set the locale based on, e.g., a user preference stored in a
+        database, or get_browser_locale, which uses the Accept-Language
+        header.
+        """
+        self._locale = self.get_url_locale(handler)
+        if not self._locale:
+            self._locale = self.get_user_locale(handler)
+            if not self._locale:
+                self._locale = self.get_browser_locale(handler)
+                assert self._locale
+        return self._locale
+
+    def get_user_locale(self, handler):
+        """Override to determine the locale from the authenticated user.
+        
+        If None is returned, we fall back to get_browser_locale().
+        
+        This method should return a tornado.locale.Locale object,
+        most likely obtained via a call like tornado.locale.get("en")
+        """
+        return None
+
+    def get_browser_locale(self, handler, default="en_US"):
+        """Determines the user's locale from Accept-Language header.
+        
+        See http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.4
+        """
+        return handler.request.get_browser_locale(default)
+
+    def get_url_locale(self, handler):
+        """Determines the user's locale from URL."""
+        if handler.url_lang is not None:
+            return locale.get(handler.url_lang)
+        return None
 
 
 class HTTPError(Exception):
@@ -1445,7 +1505,10 @@ class ErrorHandler(RequestHandler):
         self.set_status(status_code)
 
     def prepare(self):
-        raise HTTPError(self._status_code)
+        if self.settings.get('debug', False):
+            self.render('%s.html' % (self._status_code, ), handlers=self.application.handlers)
+        else:
+            raise HTTPError(self._status_code)
 
 
 class RedirectHandler(RequestHandler):
@@ -1588,7 +1651,7 @@ class StaticFileHandler(RequestHandler):
         is the static path being requested.  The url returned should be
         relative to the current host.
         """
-        static_url_prefix = settings.get('static_url_prefix', '/static/')
+        static_url_prefix = settings.get('static_url_prefix', 'static/')
         version_hash = cls.get_version(settings, path)
         if version_hash:
             return static_url_prefix + path + "?v=" + version_hash
@@ -1894,9 +1957,91 @@ class TemplateModule(UIModule):
         return "".join(self._get_resources("html_body"))
 
 
+def unquote(s):
+    if s is None: return s
+    return escape.url_unescape(s, encoding=None)
+
+
+class URLSpecMatch(object):
+    def __init__(self, spec, request, match, application, i18n=False, lang=None):
+        """docstring for __init__"""
+        self.spec        = spec
+        self.request     = request
+        self.match       = match
+        self.application = application
+        self.i18n        = i18n
+        self.lang        = lang
+
+    def get_handler(self, lang=None):
+        """docstring for get_handler"""
+        return self.spec.handler_class(self.application, self.request, self, lang or self.lang, **self.spec.kwargs)
+
+    def get_base_args(self):
+        """docstring for get_base_args"""
+        regex = self.spec.regex
+        args = []
+        
+        if regex.groups and not regex.groupindex:
+            args = [unquote(s) for s in self.match.groups()]
+        
+        return args
+
+    def get_args(self):
+        """docstring for get_args"""
+        return self.get_base_args()
+
+    @property
+    def args(self):
+        """docstring for args"""
+        return self.get_args()
+
+    def get_kwargs(self):
+        """docstring for get_kwargs"""
+        if self.spec.regex.groups and self.spec.regex.groupindex:
+            # None-safe wrapper around url_unescape to handle
+            # unmatched optional groups correctly
+            
+            # Pass matched groups to the handler.  Since
+            # match.groups() includes both named and unnamed groups,
+            # we want to use either groups or groupdict but not both.
+            # Note that args are passed as bytes so the handler can
+            # decide what encoding to use.
+            
+            return dict(
+                (k, unquote(v))
+                for (k, v) in self.match.groupdict().iteritems())
+        
+        return {}
+
+    @property
+    def kwargs(self):
+        """docstring for kwargs"""
+        return self.get_kwargs()
+
+
+class URLSpecMatchRedirect(URLSpecMatch):
+    """docstring for URLSpecMatchRedirect"""
+    @property
+    def args(self):
+        """docstring for args"""
+        return []
+
+    @property
+    def kwargs(self):
+        """docstring for args"""
+        return {}
+
+    def get_handler(self):
+        """docstring for get_handler"""
+        url = "http://" + self.application.default_host + '/' + self.lang + self.application.reverse_url(self.spec.name, None, *self.get_args(), **self.get_kwargs())
+        if url.endswith('/'):
+            url = url[:-1]
+        return RedirectHandler(self.application, self.request, self, url=url, url_lang=self.lang, permanent=False)
+
+
 class URLSpec(object):
     """Specifies mappings between URLs and handlers."""
-    def __init__(self, pattern, handler_class, kwargs=None, name=None):
+    def __init__(self, pattern, handler_class, kwargs={}, name=None, i18n=False):
         """Creates a URLSpec.
 
         Parameters:
@@ -1922,7 +2067,8 @@ class URLSpec(object):
         self.handler_class = handler_class
         self.kwargs = kwargs or {}
         self.name = name
-        self._path, self._group_count = self._find_groups()
+        self.i18n = i18n
+        self._path, self._group_count, self._named_path, self._named_group_count = self._find_groups()
 
     def _find_groups(self):
         """Returns a tuple (reverse string, group count) for a url.
@@ -1939,35 +2085,127 @@ class URLSpec(object):
         if self.regex.groups != pattern.count('('):
             # The pattern is too complicated for our simplistic matching,
             # so we can't support reversing it.
-            return (None, None)
+            return (None, None, None, None)
 
-        pieces = []
+        pieces            = []
+        named_pieces      = []
+        i18n_pieces       = {}
+        i18n_named_pieces = {}
+        nb                = 0
+        
+        def unescape(str):
+            return str.replace('\.', '.').replace('\*', '*').replace('\?', '?')
+        
         for fragment in pattern.split('('):
             if ')' in fragment:
                 paren_loc = fragment.index(')')
                 if paren_loc >= 0:
-                    pieces.append('%s' + fragment[paren_loc + 1:])
+                    pieces.append('%s' + unescape(fragment[paren_loc + 1:]))
+                    
+                match = named_group_regex.match(fragment[:paren_loc])
+                if match:
+                    name = match.groups()[0]
+                    if paren_loc >= 0:
+                        named_pieces.append('%(' + name + ')s' + unescape(fragment[paren_loc + 1:]))
+                        nb += 1
             else:
-                pieces.append(fragment)
+                pieces.append(unescape(fragment))
 
-        return (''.join(pieces), self.regex.groups)
+        return (''.join(pieces) or '/', self.regex.groups, ''.join(named_pieces), nb)
 
-    def reverse(self, *args):
-        assert self._path is not None, \
-            "Cannot reverse url regex " + self.regex.pattern
-        assert len(args) == self._group_count, "required number of arguments "\
-            "not found"
-        if not len(args):
-            return self._path
-        converted_args = []
-        for a in args:
-            if not isinstance(a, (unicode, bytes_type)):
-                a = str(a)
-            converted_args.append(escape.url_escape(utf8(a)))
-        return self._path % tuple(converted_args)
+    def reverse(self, handler, *args, **kwargs):
+        if handler is not None:
+            if 'lang' not in kwargs:
+                lang = handler.url_lang
+            else:
+                lang = kwargs.pop('lang')
+        else:
+            lang = None
+        
+        if args and kwargs:
+            raise Exception('Args OR kwargs only')
+        result = None
+        
+        if kwargs:
+            assert self._named_path is not None, \
+                "Cannot reverse url regex " + self.regex.pattern
+            assert len(kwargs) == self._named_group_count, "required number of arguments "\
+                "not found"
+            if not len(kwargs):
+                result = self._named_path
+            else:
+                
+                new_kwargs = {}
+                for key, value in kwargs.items():
+                    new_kwargs[str(key)] = str(value)
+                
+                result = self._named_path % new_kwargs
+        else:
+            assert self._path is not None, \
+                "Cannot reverse url regex " + self.regex.pattern
+            assert len(args) == self._group_count, "required number of arguments "\
+                "not found"
+            if not len(args):
+                result = self._path
+            else:
+                converted_args = []
+                for a in args:
+                    if not isinstance(a, (unicode, bytes_type)):
+                        a = str(a)
+                    converted_args.append(escape.url_escape(utf8(a)))
+                
+                result = self._path % tuple(converted_args)
+        
+        if self.i18n and lang is not None:
+            if not result.startswith('/'):
+                result = "/%s/%s" % (lang, result, )
+            else:
+                result = "/%s%s" % (lang, result, )
+        
+        if not result.startswith('/'):
+            result = "/%s" % (result, )
+        
+        if result.endswith('/') and not result == '/':
+            result = result[:-1]
+        
+        return result
+        
+    def match(self, request, application):
+        """docstring for match"""
+        path = request.path
+        lang = None
+        
+        if self.i18n:
+            if path.startswith('/'):
+                path = path[1:]
+
+            match = regexp_lang.match(path)
+            
+            if match:
+                path = path[:match.start()] + path[match.end():]
+                lang = match.group('lang')
+                
+        if path.startswith('/'):
+            path = path[1:]
+                
+        match = self.regex.match(path)
+        # if match:
+            # return URLSpecMatch(self, request, match, application, False, lang=lang)
+        
+        # match = self.regex.match(path)
+        # print 'MATCH : ', match
+        if match:
+            # print self.i18n
+            if self.i18n and not lang:
+                lang = request.get_browser_locale()
+                # print self.i18n, lang
+                return URLSpecMatchRedirect(self, request, match, application, True, lang=lang.lang)
+            else:
+                return URLSpecMatch(self, request, match, application, False, lang=lang)
+        return None
 
 url = URLSpec
-
+i18n_url = functools.partial(URLSpec, i18n = True)
 
 def _time_independent_equals(a, b):
     if len(a) != len(b):
