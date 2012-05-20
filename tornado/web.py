@@ -91,7 +91,8 @@ except ImportError:
     from cStringIO import StringIO as BytesIO  # python 2
 
 named_group_regex = re.compile(r'\?P<(.*)>')
-regexp_lang = re.compile(r'^(?P<lang>[\w]{2,3})(?=$|/)/')
+regexp_lang = re.compile(r'^(?P<lang>[\w]{2,3})(?=$|/)')
+regexp_lang2 = re.compile(r'^(?P<lang>[\w]{2,3})(?=$|/)/')
 
 class RequestHandler(object):
     """Subclass this class and define get() or post() to make a handler.
