@@ -116,13 +116,18 @@ def engine(func):
             return False
         with ExceptionStackContext(handle_exception):
             gen = func(*args, **kwargs)
+            callback = kwargs.get('callback')
+            instance = None
             if isinstance(gen, types.GeneratorType):
                 if len(args) > 0 and hasattr(args[0], '_handle_request_exception'):
                     instance = args[0]
-                else:
-                    instance = None
+                elif len(args) > 0 and hasattr(args[0], '__self__') and hasattr(args[0].__self__, '_handle_request_exception'):
+                    instance = args[0].__self__
+                # elif len(args) == 1:
+                    # if hasattr(args[0], '__call__') and callback is None:
+                        # callback = args[0]
                     
-                runner = Runner(gen, kwargs.get('callback'), instance)
+                runner = Runner(gen, callback, instance)
                 runner.run()
                 return
             assert gen is None, gen
@@ -365,14 +370,17 @@ class Runner(object):
                     return
                 except Exception as e:
                     self.finished = True
+                    exc_info = sys.exc_info()
                     if self.callback:
-                        self.callback(e, sys.exc_info())
+                        self.callback(e, exc_info)
                         break
                     else:
                         if self.instance:
-                            self.instance._handle_request_exception(e)
+                            method = self.instance._handle_request_exception
+                            method(e)
                             break
                         else:
+                            yielded = self.gen.throw(*exc_info)
                             raise
                             
                 if isinstance(yielded, list):

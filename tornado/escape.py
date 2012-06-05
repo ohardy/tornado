@@ -70,7 +70,8 @@ _XHTML_ESCAPE_RE = re.compile('[&<>"]')
 _XHTML_ESCAPE_DICT = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}
 
 
-def xhtml_escape(value):
+# def xhtml_escape(value, callback):
+def xhtml_escape(value, *args, **kwargs):
     """Escapes a string so it is valid within XML or XHTML."""
     return _XHTML_ESCAPE_RE.sub(lambda match: _XHTML_ESCAPE_DICT[match.group(0)],
                                 to_basestring(value))

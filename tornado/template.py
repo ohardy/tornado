@@ -213,21 +213,25 @@ class Template(object):
         self.namespace = loader.namespace if loader else {}
         reader = _TemplateReader(name, escape.native_str(template_string))
         self.file = _File(self, _parse(reader, self))
-        self.code = self._generate_python(loader, compress_whitespace)
-        self.loader = loader
-        try:
-            # Under python2.5, the fake filename used here must match
-            # the module name used in __name__ below.
-            self.compiled = compile(
-                escape.to_unicode(self.code),
-                "%s.generated.py" % self.name.replace('.', '_'),
-                "exec")
-        except Exception:
-            formatted_code = _format_code(self.code).rstrip()
-            logging.error("%s code:\n%s", self.name, formatted_code)
-            raise 
+        
+        def mod_callback(code):
+            self.code = code
+            self.loader = loader
+            try:
+                # Under python2.5, the fake filename used here must match
+                # the module name used in __name__ below.
+                self.compiled = compile(
+                    escape.to_unicode(self.code),
+                    "%s.generated.py" % self.name.replace('.', '_'),
+                    "exec")
+            except Exception:
+                formatted_code = _format_code(self.code).rstrip()
+                # logging.error("%s code:\n%s", self.name, formatted_code)
+                raise
+                
+        self._generate_python(loader, compress_whitespace, mod_callback)
 
-    def generate(self, **kwargs):
+    def generate(self, callback, **kwargs):
         """Generate this template with the given arguments."""
         namespace = {
             "escape": escape.xhtml_escape,
@@ -255,14 +259,14 @@ class Template(object):
         # unittests, where different tests reuse the same name).
         linecache.clearcache()
         try:
-            return execute()
+            execute(callback)
         except Exception:
             formatted_code = _format_code(self.code).rstrip()
-            logging.error("%s code:\n%s", self.name, formatted_code)
+            # logging.error("%s code:\n%s", self.name, formatted_code)
             exc_info = sys.exc_info()
             raise_exc_info(exc_info)
 
-    def _generate_python(self, loader, compress_whitespace):
+    def _generate_python(self, loader, compress_whitespace, callback):
         buffer = cStringIO.StringIO()
         try:
             # named_blocks maps from names to _NamedBlock objects
@@ -275,7 +279,7 @@ class Template(object):
             writer = _CodeWriter(buffer, named_blocks, loader, ancestors[0].template,
                                  compress_whitespace)
             ancestors[0].generate(writer)
-            return buffer.getvalue()
+            callback(buffer.getvalue())
         finally:
             buffer.close()
 
@@ -400,13 +404,15 @@ class _File(_Node):
         self.line = 0
 
     def generate(self, writer):
-        writer.write_line("def _execute():", self.line)
+        writer.write_line("from tornado import gen", self.line)
+        writer.write_line("@gen.engine", self.line)
+        writer.write_line("def _execute(callback):", self.line)
         with writer.indent():
             writer.write_line("locale = current_locale", self.line)
             writer.write_line("_buffer = []", self.line)
             writer.write_line("_append = _buffer.append", self.line)
             self.body.generate(writer)
-            writer.write_line("return _utf8('').join(_buffer)", self.line)
+            writer.write_line("callback(_utf8('').join(_buffer))", self.line)
 
     def each_child(self):
         return (self.body,)
@@ -552,6 +558,9 @@ class _Expression(_Node):
 
     def generate(self, writer):
         writer.write_line("_tmp = %s" % self.expression, self.line)
+        writer.write_line("if getattr(_tmp, 'async', False):"
+                          " _tmp = yield gen.Task(_tmp)", self.line)
+
         writer.write_line("if isinstance(_tmp, _string_types):"
                           " _tmp = _utf8(_tmp)", self.line)
         writer.write_line("else: _tmp = _utf8(str(_tmp))", self.line)
@@ -567,6 +576,17 @@ class _Module(_Expression):
     def __init__(self, expression, line):
         super(_Module, self).__init__("_modules." + expression, line,
                                       raw=True)
+
+class _AsyncModule(_Expression):
+    def __init__(self, expression, line):
+        super(_Module, self).__init__("yield _modules." + expression, line,
+                                      raw=True)
+
+class _Async(_Expression):
+    pass
+    # def __init__(self, expression, line):
+        # super(_Async, self).__init__("yield gen.Task(" + expression + ")", line,
+                                      # raw=True)
 
 
 class _Text(_Node):
@@ -809,7 +829,7 @@ def _parse(reader, template, in_block=None):
             return body
 
         elif operator in ("extends", "include", "set", "import", "from",
-                          "comment", "autoescape", "raw", "module"):
+                          "comment", "autoescape", "raw", "module", "async"):
             if operator == "comment":
                 continue
             if operator == "extends":
@@ -840,6 +860,10 @@ def _parse(reader, template, in_block=None):
                 block = _Expression(suffix, line, raw=True)
             elif operator == "module":
                 block = _Module(suffix, line)
+            elif operator == "amodule":
+                block = _AsyncModule(suffix, line)
+            elif operator == "async":
+                block = _Async(suffix, line)
             body.chunks.append(block)
             continue
 

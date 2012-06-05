@@ -114,7 +114,7 @@ class RequestHandler(object):
         self.spec_match = spec_match
         self._headers_written = False
         self._finished = False
-        self._auto_finish = True
+        self._auto_finish = False
         self._transforms = None  # will be set in _execute
         self.ui = ObjectDict((n, self._ui_method(m)) for n, m in
                      application.ui_methods.iteritems())
@@ -506,11 +506,8 @@ class RequestHandler(object):
             self.set_header("Content-Type", "application/json; charset=UTF-8")
         chunk = utf8(chunk)
         self._write_buffer.append(chunk)
-
-    def render(self, template_name, **kwargs):
-        """Renders the template with the given arguments as the response."""
-        html = self.render_string(template_name, **kwargs)
-
+        
+    def _render(self, html):
         # Insert the additional JS and CSS added by the modules on the page
         js_embed = []
         js_files = []
@@ -592,8 +589,12 @@ class RequestHandler(object):
             hloc = html.index(b('</body>'))
             html = html[:hloc] + b('').join(html_bodies) + b('\n') + html[hloc:]
         self.finish(html)
-
-    def render_string(self, template_name, **kwargs):
+        
+    def render(self, template_name, **kwargs):
+        """Renders the template with the given arguments as the response."""
+        self.render_string(template_name, self._render, **kwargs)
+        
+    def render_string(self, template_name, callback, **kwargs):
         """Generate the given template with the given arguments.
 
         We return the generated string. To generate and write a template
@@ -627,7 +628,7 @@ class RequestHandler(object):
         )
         args.update(self.ui)
         args.update(kwargs)
-        return t.generate(**args)
+        t.generate(callback, **args)
 
     def create_template_loader(self, template_path):
         settings = self.settings
@@ -1095,13 +1096,40 @@ class RequestHandler(object):
                 self._active_modules = {}
             if name not in self._active_modules:
                 self._active_modules[name] = module(self)
-            rendered = self._active_modules[name].render(*args, **kwargs)
-            return rendered
+                
+            def render2(callback=None):
+                if callback:
+                    kwargs['callback'] = callback
+                    
+                return self._active_modules[name].render(*args, **kwargs)
+                
+            if getattr(self._active_modules[name].render, 'async', False):
+                render2.async = True
+                return render2
+            else:
+                return render2()
         return render
 
     def _ui_method(self, method):
-        return lambda *args, **kwargs: method(self, *args, **kwargs)
-
+        def render(*args, **kwargs):
+            if getattr(method, 'with_handler', False):
+                args = list(args)
+                args.insert(0, self)
+                args = tuple(args)
+                
+            def render2(callback=None):
+                if callback:
+                    kwargs['callback'] = callback
+                    
+                return method(*args, **kwargs)
+                
+            if getattr(method, 'async', False):
+                render2.async = True
+                return render2
+            else:
+                return render2()
+                
+        return render
 
 def asynchronous(method):
     """Wrap request handler methods with this if they are asynchronous.
@@ -1376,6 +1404,10 @@ class Application(object):
                         self.ui_modules[name] = cls
                 except TypeError:
                     pass
+                    
+    def get_error_handler_class(self):
+        """docstring for get_error_handler_class"""
+        return self.settings.get('error_handler_class', ErrorHandler)
 
     def __call__(self, request):
         """Called by HTTPServer to execute the request."""
@@ -1394,9 +1426,10 @@ class Application(object):
                     handler = spec_match.get_handler()
                     args    = spec_match.args
                     kwargs  = spec_match.kwargs
+                    handler.format = kwargs.pop('format', None)
                     break
             if not handler:
-                handler = ErrorHandler(self, request, None, status_code=404)
+                handler = self.get_error_handler_class()(self, request, None, status_code=404)
 
         # In debug mode, re-compile templates and reload static files on every
         # request so you don't need to restart to see changes
@@ -1875,9 +1908,9 @@ class UIModule(object):
         """Returns an HTML string that will be put in the <body/> element"""
         return None
 
-    def render_string(self, path, **kwargs):
+    def render_string(self, path, callback, **kwargs):
         """Renders a template and returns it as a string."""
-        return self.handler.render_string(path, **kwargs)
+        return self.handler.render_string(path, callback, **kwargs)
 
 
 class _linkify(UIModule):
@@ -1977,7 +2010,7 @@ class URLSpecMatch(object):
         """docstring for get_handler"""
         return self.spec.handler_class(self.application, self.request, self, lang or self.lang, **self.spec.kwargs)
 
-    def get_base_args(self):
+    def get_args(self):
         """docstring for get_base_args"""
         regex = self.spec.regex
         args = []
@@ -1987,16 +2020,13 @@ class URLSpecMatch(object):
         
         return args
 
-    def get_args(self):
-        """docstring for get_args"""
-        return self.get_base_args()
-
     @property
     def args(self):
         """docstring for args"""
         return self.get_args()
 
-    def get_kwargs(self):
+    @property
+    def kwargs(self):
         """docstring for get_kwargs"""
         if self.spec.regex.groups and self.spec.regex.groupindex:
             # None-safe wrapper around url_unescape to handle
@@ -2014,11 +2044,6 @@ class URLSpecMatch(object):
         
         return {}
 
-    @property
-    def kwargs(self):
-        """docstring for kwargs"""
-        return self.get_kwargs()
-
 
 class URLSpecMatchRedirect(URLSpecMatch):
     """docstring for URLSpecMatchRedirect"""
@@ -2034,7 +2059,7 @@ class URLSpecMatchRedirect(URLSpecMatch):
 
     def get_handler(self):
         """docstring for get_handler"""
-        url = "http://" + self.application.default_host + '/' + self.lang + self.application.reverse_url(self.spec.name, None, *self.get_args(), **self.get_kwargs())
+        url = "http://" + self.application.default_host + '/' + self.lang + self.application.reverse_url(self.spec.name, None, *self.args, **self.kwargs)
         if url.endswith('/'):
             url = url[:-1]
         return RedirectHandler(self.application, self.request, self, url=url, url_lang=self.lang, permanent=False)
@@ -2042,7 +2067,7 @@ class URLSpecMatchRedirect(URLSpecMatch):
 
 class URLSpec(object):
     """Specifies mappings between URLs and handlers."""
-    def __init__(self, pattern, handler_class, kwargs={}, name=None, i18n=False):
+    def __init__(self, pattern, handler_class, kwargs={}, name=None, i18n=False, handle_format=False):
         """Creates a URLSpec.
 
         Parameters:
@@ -2061,6 +2086,13 @@ class URLSpec(object):
         """
         if not pattern.endswith('$'):
             pattern += '$'
+        self.handle_format = handle_format
+        if self.handle_format:
+            if pattern.endswith('$'):
+                pattern = pattern[:-1]
+            
+            pattern = pattern + '(?:\.(?P<format>\w+))?'
+        
         self.regex = re.compile(pattern)
         assert len(self.regex.groupindex) in (0, self.regex.groups), \
             ("groups in url regexes must either be all named or all "
@@ -2083,10 +2115,10 @@ class URLSpec(object):
         if pattern.endswith('$'):
             pattern = pattern[:-1]
 
-        if self.regex.groups != pattern.count('('):
+        # if self.regex.groups != pattern.count('('):
             # The pattern is too complicated for our simplistic matching,
             # so we can't support reversing it.
-            return (None, None, None, None)
+            # return (None, None, None, None)
 
         pieces            = []
         named_pieces      = []
@@ -2098,6 +2130,11 @@ class URLSpec(object):
             return str.replace('\.', '.').replace('\*', '*').replace('\?', '?')
         
         for fragment in pattern.split('('):
+            if fragment == '?:\.':
+                pieces.append('%s')
+                named_pieces.append('%(format)s')
+                nb += 1
+                break
             if ')' in fragment:
                 paren_loc = fragment.index(')')
                 if paren_loc >= 0:
@@ -2128,6 +2165,8 @@ class URLSpec(object):
         result = None
         
         if kwargs:
+            if not 'format' in kwargs:
+                kwargs['format'] = ''
             assert self._named_path is not None, \
                 "Cannot reverse url regex " + self.regex.pattern
             assert len(kwargs) == self._named_group_count, "required number of arguments "\
@@ -2142,6 +2181,8 @@ class URLSpec(object):
                 
                 result = self._named_path % new_kwargs
         else:
+            if len(args) == self._group_count - 1:
+                args = tuple(list(args) + [''])
             assert self._path is not None, \
                 "Cannot reverse url regex " + self.regex.pattern
             assert len(args) == self._group_count, "required number of arguments "\
@@ -2264,3 +2305,11 @@ def _create_signature(secret, *parts):
     for part in parts:
         hash.update(utf8(part))
     return utf8(hash.hexdigest())
+    
+def async(func):
+    func.async = True
+    return func
+    
+def with_handler(func):
+    func.with_handler = True
+    return func
