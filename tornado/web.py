@@ -82,6 +82,7 @@ from tornado import escape
 from tornado import locale
 from tornado import stack_context
 from tornado import template
+from tornado import locale
 from tornado.escape import utf8, _unicode
 from tornado.util import b, bytes_type, import_object, ObjectDict, raise_exc_info
 
@@ -93,6 +94,14 @@ except ImportError:
 named_group_regex = re.compile(r'\?P<(.*)>')
 regexp_lang = re.compile(r'^(?P<lang>[\w]{2,3})(?=$|/)')
 regexp_lang2 = re.compile(r'^(?P<lang>[\w]{2,3})(?=$|/)/')
+
+def async(func):
+    func.async = True
+    return func
+    
+def with_handler(func):
+    func.with_handler = True
+    return func
 
 class RequestHandler(object):
     """Subclass this class and define get() or post() to make a handler.
@@ -801,6 +810,8 @@ class RequestHandler(object):
         """
         if not hasattr(self, "_locale"):
             self._locale = self.application.get_locale(self)
+            if isinstance(self._locale, basestring):
+                self._locale = locale.get(self._locale)
             
         return self._locale
 
@@ -1487,7 +1498,7 @@ class Application(object):
         """
         self._locale = self.get_url_locale(handler)
         if not self._locale:
-            self._locale = self.get_user_locale(handler)
+            self._locale = handler.get_user_locale()
             if not self._locale:
                 self._locale = self.get_browser_locale(handler)
                 assert self._locale
@@ -2306,11 +2317,3 @@ def _create_signature(secret, *parts):
     for part in parts:
         hash.update(utf8(part))
     return utf8(hash.hexdigest())
-    
-def async(func):
-    func.async = True
-    return func
-    
-def with_handler(func):
-    func.with_handler = True
-    return func

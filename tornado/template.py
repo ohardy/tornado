@@ -656,12 +656,12 @@ class _CodeWriter(object):
     def write_line(self, line, line_number, indent=None):
         if indent == None:
             indent = self._indent
-        line_comment = '  # %s:%d' % (self.current_template.name, line_number)
+        line_comment = u'  # %s:%d' % (self.current_template.name, line_number)
         if self.include_stack:
-            ancestors = ["%s:%d" % (tmpl.name, lineno)
+            ancestors = [u"%s:%d" % (tmpl.name, lineno)
                          for (tmpl, lineno) in self.include_stack]
-            line_comment += ' (via %s)' % ', '.join(reversed(ancestors))
-        print >> self.file, "    " * indent + line + line_comment
+            line_comment += u' (via %s)' % ', '.join(reversed(ancestors))
+        print >> self.file, u"    " * indent + unicode(line, errors='ignore') + line_comment
 
 
 class _TemplateReader(object):
