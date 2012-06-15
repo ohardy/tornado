@@ -1954,7 +1954,7 @@ class TemplateModule(UIModule):
                     raise ValueError("set_resources called with different "
                                      "resources for the same template")
             return ""
-        return self.render_string(path, set_resources=set_resources,
+        self.render_string(path, callback, set_resources=set_resources,
                                   **kwargs)
 
     def _get_resources(self, key):
