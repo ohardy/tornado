@@ -1943,8 +1943,9 @@ class TemplateModule(UIModule):
         # keep resources in both a list and a dict to preserve order
         self._resource_list = []
         self._resource_dict = {}
-
-    def render(self, path, **kwargs):
+    
+    @async
+    def render(self, path, callback, **kwargs):
         def set_resources(**kwargs):
             if path not in self._resource_dict:
                 self._resource_list.append(kwargs)
