@@ -46,6 +46,7 @@ import datetime
 import logging
 import os
 import re
+import locale as python_locale
 
 from tornado import escape
 
@@ -444,6 +445,10 @@ class Locale(object):
             parts.append(value[-3:])
             value = value[:-3]
         return ",".join(reversed(parts))
+        
+    def format(self, *args, **kwargs):
+        python_locale.setlocale(python_locale.LC_ALL, self.code)
+        return python_locale.format(*args, **kwargs)
 
 
 class CSVLocale(Locale):
